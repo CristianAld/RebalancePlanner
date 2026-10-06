@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from risk import annualized_cov, load_prices, portfolio_vol, risk_contributions
+from risk import (annualized_cov, load_prices, past_year, portfolio_vol, risk_contributions,
+                  tracking_error)
 
 PRICES_CSV = Path(__file__).resolve().parent.parent / "data" / "prices.csv"
 
@@ -58,6 +59,39 @@ def test_contributions_sum_to_sigma(synthetic_prices):
     rc = risk_contributions(w, cov)
     assert rc.sum() == pytest.approx(sigma)
     assert (rc / sigma).sum() == pytest.approx(1.0)
+
+
+def test_tracking_error_hand_checked():
+    cov = pd.DataFrame([[0.04, 0.0], [0.0, 0.01]], index=["A", "B"], columns=["A", "B"])
+    w = pd.Series({"A": 0.6, "B": 0.4})
+    target = pd.Series({"A": 0.5, "B": 0.5})
+    assert tracking_error(w, target, cov) == pytest.approx(np.sqrt(0.1**2 * 0.04 + 0.1**2 * 0.01))
+    assert tracking_error(target, target, cov) == pytest.approx(0)
+
+
+def test_tracking_error_handles_ticker_missing_from_one_side():
+    cov = pd.DataFrame([[0.04, 0.0], [0.0, 0.01]], index=["A", "B"], columns=["A", "B"])
+    # B is held but not in the target (off-model)
+    assert tracking_error(pd.Series({"A": 0.9, "B": 0.1}), pd.Series({"A": 1.0}), cov) == \
+        pytest.approx(np.sqrt(0.1**2 * 0.04 + 0.1**2 * 0.01))
+
+
+def test_past_year_hand_checked():
+    prices = pd.DataFrame({"A": [100, 110, 99, 121], "B": [100, 100, 100, 100]},
+                          index=pd.bdate_range("2025-01-02", periods=4, name="Date"))
+    # All in A: +10%, -10%, +22.2% -> 121/100 - 1; worst fall 110 -> 99 = -10%
+    stats = past_year(pd.Series({"A": 1.0}), prices)
+    assert stats["total_return"] == pytest.approx(0.21)
+    assert stats["max_drawdown"] == pytest.approx(-0.10)
+    # Half in cash-like B halves each daily move
+    half = past_year(pd.Series({"A": 0.5, "B": 0.5}), prices)
+    assert half["total_return"] == pytest.approx(1.05 * 0.95 * (1 + 0.5 * 22 / 99) - 1)
+    assert half["max_drawdown"] == pytest.approx(-0.05)
+
+
+def test_past_year_never_reports_positive_drawdown():
+    prices = pd.DataFrame({"A": [100, 101, 102]}, index=pd.bdate_range("2025-01-02", periods=3, name="Date"))
+    assert past_year(pd.Series({"A": 1.0}), prices)["max_drawdown"] == 0.0
 
 
 def test_load_prices_roundtrip(tmp_path, synthetic_prices):
