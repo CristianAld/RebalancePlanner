@@ -1,0 +1,24 @@
+[theme]
+base = "light"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap, sans-serif"
+primaryColor = "#000000"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f4f2"
+textColor = "#111111"
+borderColor = "#dcdcd8"
+dataframeHeaderBackgroundColor = "#f4f4f2"
+linkColor = "#000000"
+baseRadius = "0.125rem"
+buttonRadius = "0.125rem"
+headingFontWeights = [800, 700, 700, 600, 600, 600]
+metricValueFontSize = "1.75rem"
+metricValueFontWeight = 700
+showWidgetBorder = true
+
+[theme.sidebar]
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#1f1f1f"
+textColor = "#ffffff"
+primaryColor = "#ffffff"
+borderColor = "#3a3a3a"
+headingFontWeights = [800, 700, 700, 600, 600, 600]
