@@ -75,6 +75,27 @@ def test_no_breaches_no_trades(sample_holdings, sample_targets):
     assert (corridor_trades(d) == 0).all()
 
 
+@pytest.mark.parametrize("scale", [0.004, 40, 4_000])   # $1k, $10M, $1B accounts
+def test_account_size_scales_trades_not_decisions(sample_holdings, sample_targets, sample_drift, scale):
+    d = compute_drift(sample_holdings * scale, sample_targets, abs_band=0.05, rel_band=0.25)
+    assert d["breach"].tolist() == sample_drift["breach"].tolist()
+    assert d["current_weight"].to_dict() == pytest.approx(sample_drift["current_weight"].to_dict())
+    assert corridor_trades(d).to_dict() == pytest.approx((corridor_trades(sample_drift) * scale).to_dict())
+
+
+def test_one_fund_blowing_up_is_brought_back(sample_holdings, sample_targets):
+    # GLD (5% target) goes up 10x and swamps the account
+    holdings = sample_holdings.copy()
+    holdings["GLD"] *= 10
+    d = compute_drift(holdings, sample_targets, abs_band=0.05, rel_band=0.25)
+    t = corridor_trades(d)
+    w = post_trade_weights(d, t)
+    assert d.loc["GLD", "breach"]
+    assert w["GLD"] == pytest.approx(0.05)
+    assert t.sum() == pytest.approx(0, abs=1e-6)
+    assert (w >= -1e-12).all()
+
+
 def test_turnover_corridor_vs_full(sample_drift):
     corridor = turnover(corridor_trades(sample_drift))
     full = turnover(full_trades(sample_drift))

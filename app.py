@@ -13,7 +13,8 @@ import streamlit as st
 
 from drift import compute_drift
 from rebalance import corridor_trades, full_trades, turnover
-from risk import annualized_cov, load_prices, portfolio_vol, risk_contributions
+from risk import (annualized_cov, load_prices, past_year, portfolio_vol, risk_contributions,
+                  tracking_error)
 
 DATA = Path(__file__).resolve().parent / "data"
 MIN_TRADE = 0.01
@@ -34,30 +35,55 @@ FUND_NAMES = {
     "SHV": "Short-term Treasuries",
 }
 
+# Model mixes (target % per fund), lowest risk first. "Current plan" comes from the account file.
+MODELS = {
+    "Conservative": ({"VTI": 20, "VXUS": 10, "BND": 45, "VNQ": 5, "GLD": 5, "SHV": 15},
+                     "Mostly bonds and cash."),
+    "Balanced": ({"VTI": 30, "VXUS": 15, "BND": 35, "VNQ": 5, "GLD": 5, "SHV": 10},
+                 "About half stocks, half bonds and cash."),
+    "Growth": ({"VTI": 50, "VXUS": 25, "BND": 15, "VNQ": 5, "GLD": 5, "SHV": 0},
+               "Mostly stocks, some bonds."),
+    "Aggressive": ({"VTI": 60, "VXUS": 30, "BND": 0, "VNQ": 5, "GLD": 5, "SHV": 0},
+                   "Almost all stocks."),
+    "Equal weight": ({t: 100 / 6 for t in FUND_NAMES},
+                     "Same share in every fund. A baseline, not a risk choice."),
+}
+CURRENT_PLAN = "Current plan"
+
 CSS = """
 <style>
-.hero { background:#000; color:#fff; padding:2rem 1.75rem 1.75rem; margin:0 0 1.25rem; }
-.hero .eyebrow { font-size:.75rem; letter-spacing:.14em; text-transform:uppercase; color:#b5b5b0; margin:0 0 .75rem; }
-.hero h1 { color:#fff; font-size:clamp(1.6rem, 4.5vw, 2.4rem); line-height:1.15; font-weight:800; margin:0 0 .75rem; padding:0; }
-.hero p { color:#dcdcd8; font-size:1.02rem; line-height:1.5; margin:0; max-width:46rem; }
-.step { font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:#6b6b68; margin:1.75rem 0 -.5rem;
-        border-top:3px solid #000; padding-top:.75rem; font-weight:600; }
-.ticket { display:flex; flex-wrap:wrap; align-items:baseline; gap:.35rem .9rem; padding:.85rem 0;
-          border-bottom:1px solid #e4e4e0; }
-.ticket .side { font-size:.72rem; font-weight:700; letter-spacing:.1em; padding:.2rem .55rem; min-width:3.2rem; text-align:center; }
+[data-testid="stMainBlockContainer"] { padding-top:2.25rem; max-width:1240px; }
+[data-testid="stHeader"] { background:transparent; }
+h2, h3 { letter-spacing:-.015em; }
+.brand { display:flex; flex-wrap:wrap; align-items:baseline; gap:.25rem .75rem; margin:0 0 1rem; }
+.brand b { font-size:1.05rem; font-weight:800; letter-spacing:-.01em; }
+.brand span { color:#6b6b68; font-size:.9rem; }
+.hero { background:#000; color:#fff; padding:1.6rem 1.75rem 1.5rem; margin:0 0 1rem; }
+.hero .eyebrow { font-size:.7rem; letter-spacing:.14em; text-transform:uppercase; color:#9a9a95; margin:0 0 .6rem; }
+.hero h1 { color:#fff; font-size:clamp(1.45rem, 3.2vw, 2.1rem); line-height:1.15; font-weight:800; margin:0 0 .5rem; padding:0; letter-spacing:-.02em; }
+.hero p { color:#cfcfca; font-size:.95rem; line-height:1.5; margin:0; font-variant-numeric:tabular-nums; }
+[data-testid="stMetricLabel"] p { font-size:.7rem; letter-spacing:.08em; text-transform:uppercase; color:#6b6b68; font-weight:600; }
+[data-testid="stMetricValue"] { font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+[data-testid="stTab"] p { font-size:.95rem; font-weight:600; }
+.step { font-size:.68rem; letter-spacing:.14em; text-transform:uppercase; color:#6b6b68; margin:1.5rem 0 -.6rem;
+        border-top:2px solid #000; padding-top:.6rem; font-weight:600; }
+.lede { font-size:.95rem; color:#111; margin:-.35rem 0 .5rem; font-variant-numeric:tabular-nums; }
+.lede span { color:#6b6b68; }
+.ticket { display:flex; flex-wrap:wrap; align-items:baseline; gap:.2rem .8rem; padding:.7rem 0;
+          border-bottom:1px solid #ececea; }
+.ticket .side { font-size:.66rem; font-weight:700; letter-spacing:.1em; padding:.15rem .5rem; min-width:3rem; text-align:center; }
 .ticket .buy { background:#000; color:#fff; border:1.5px solid #000; }
 .ticket .sell { background:#fff; color:#000; border:1.5px solid #000; }
-.ticket .amt { font-size:1.15rem; font-weight:700; font-variant-numeric:tabular-nums; min-width:6.5rem; }
+.ticket .amt { font-size:1.05rem; font-weight:700; font-variant-numeric:tabular-nums; min-width:6.5rem; }
 .ticket .fund { font-weight:600; }
 .ticket .fund span { color:#6b6b68; font-weight:400; }
-.ticket .why { flex-basis:100%; color:#4a4a47; font-size:.92rem; line-height:1.45; }
-.hold { color:#6b6b68; font-size:.92rem; padding-top:.75rem; }
-.goal { border-left:3px solid #000; padding:.15rem 0 .15rem 1rem; margin:0 0 1rem; font-size:.98rem; line-height:1.55; }
-.goal .hint { display:block; color:#6b6b68; font-size:.88rem; margin-top:.4rem; }
+.ticket .why { flex-basis:100%; color:#6b6b68; font-size:.85rem; font-variant-numeric:tabular-nums; }
+.hold { color:#6b6b68; font-size:.85rem; padding-top:.6rem; }
+.note { font-size:.95rem; margin:.25rem 0 .25rem; }
 </style>
 """
 
-st.set_page_config(page_title="Rebalance Planner", page_icon="⚖️", layout="centered")
+st.set_page_config(page_title="Rebalance Planner", page_icon="⚖️", layout="wide")
 st.html(CSS)
 
 
@@ -67,8 +93,13 @@ def load_sample_account() -> pd.DataFrame:
 
 
 @st.cache_data
+def load_price_history() -> pd.DataFrame:
+    return load_prices(DATA / "prices.csv")
+
+
+@st.cache_data
 def load_cov() -> pd.DataFrame:
-    return annualized_cov(load_prices(DATA / "prices.csv"))
+    return annualized_cov(load_price_history())
 
 
 def money(x: float, cents: bool = False) -> str:
@@ -90,11 +121,15 @@ def say(text: str) -> None:
 
 
 def step(n: int, label: str) -> None:
-    st.html(f'<div class="step">Step {n} · {label}</div>')
+    st.html(f'<div class="step">{n} · {label}</div>')
+
+
+def lede(text: str) -> None:
+    st.html(f'<p class="lede">{text}</p>')
 
 
 def apply_edits(df: pd.DataFrame, edits: dict) -> pd.DataFrame:
-    """Replay st.data_editor's pending edits so text above the table can use them."""
+    """Replay st.data_editor's pending edits so code above the table can use them."""
     df = df.copy()
     for row, changes in edits.get("edited_rows", {}).items():
         for col, val in changes.items():
@@ -104,112 +139,160 @@ def apply_edits(df: pd.DataFrame, edits: dict) -> pd.DataFrame:
     return pd.concat([df, added], ignore_index=True) if len(added) else df
 
 
-# --- Sidebar: the rules ----------------------------------------------------
-st.sidebar.header("Your rules")
-st.sidebar.markdown(
-    "Prices move every day, so no fund sits exactly on its target. These two dials set "
-    "**how much drift you'll tolerate** before a fund gets traded back."
+def clean(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Editor output -> rows with a ticker, upper-cased, blanks in `col` as 0."""
+    df = df.dropna(subset=["ticker"]).fillna({col: 0})
+    df = df.assign(ticker=df["ticker"].astype(str).str.strip().str.upper())
+    return df[df["ticker"] != ""]
+
+
+def chart_layout(fig: go.Figure, height: int, **kw) -> None:
+    fig.update_layout(
+        height=height, margin=dict(l=0, r=10, t=10, b=0),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", font=dict(family="Inter, sans-serif", color=INK),
+        hoverlabel=dict(bgcolor="#ffffff", font=dict(color=INK)),
+    )
+    fig.update_layout(**kw)
+
+
+sample = load_sample_account()
+model_mixes = {CURRENT_PLAN: (dict(zip(sample["ticker"], sample["target"] * 100)),
+                              "The targets this account was set up with.")} | MODELS
+
+
+def model_frame(name: str) -> pd.DataFrame:
+    mix = model_mixes[name][0]
+    return pd.DataFrame({"ticker": list(mix), "fund": [fund(t) for t in mix], "target": list(mix.values())})
+
+
+# --- Account size <-> holdings, kept in sync -------------------------------
+# The size dial and the holdings table both describe the account. Moving the dial
+# rescales every holding (same mix, new dollars); editing a holding moves the dial.
+ss = st.session_state
+if "holdings_base" not in ss:
+    ss.holdings_base = pd.DataFrame({
+        "ticker": sample["ticker"], "fund": sample["ticker"].map(FUND_NAMES), "value": sample["value"],
+    })
+    ss.holdings_ver = 0
+live = apply_edits(ss.holdings_base, ss.get(f"holdings_{ss.holdings_ver}", {}))
+live_values = pd.to_numeric(live["value"], errors="coerce").fillna(0.0)
+live_total = float(live_values.sum())
+if "size" not in ss:
+    ss.size = ss.last_size = live_total
+elif ss.size != ss.last_size:                    # the dial moved
+    if live_total > 0:
+        live = live.assign(value=live_values * ss.size / live_total)
+        live_total = ss.size
+    ss.holdings_base = live.reset_index(drop=True)
+    ss.holdings_ver += 1
+    ss.last_size = ss.size
+elif abs(live_total - ss.size) > 0.5:            # a holding was edited
+    ss.size = ss.last_size = live_total
+
+# --- Sidebar -------------------------------------------------------------------
+st.sidebar.header("Account")
+st.sidebar.number_input(
+    "Account size ($)", min_value=0.0, step=25_000.0, format="%.0f", key="size",
+    help="Every holding scales together, so the percentages, breaches and plan stay the same. "
+         "Only the dollars change. Try $10,000 or $50,000,000.",
 )
+
+st.sidebar.header("Bands")
 abs_band = st.sidebar.slider(
-    "Wiggle room for every fund (± percentage points)", 1.0, 15.0, 5.0, 0.5, format="%.1f",
-    help="The same allowance for every fund, in percentage points of the account. "
+    "Any fund (± pts)", 1.0, 15.0, 5.0, 0.5, format="%.1f",
+    help="How far any fund may drift, in percentage points of the account, before it's traded. "
          "Technical name: absolute band.",
 ) / 100
 abs_example = st.sidebar.empty()
 rel_band = st.sidebar.slider(
-    "Extra check for small funds (± % of the fund's own target)", 5, 100, 25, 5,
-    help="Scales the allowance to the fund's size, so a small fund can't double or "
-         "vanish while staying inside the first dial. Technical name: relative band.",
+    "Small funds (± % of target)", 5, 100, 25, 5,
+    help="Scales the allowance to the fund's own target, so a small fund can't double or vanish "
+         "inside the first band. Technical name: relative band.",
 ) / 100
 rel_example = st.sidebar.empty()
-st.sidebar.markdown(
-    "**The trade-off**\n\n"
-    "- **Wider:** fewer trades and lower costs, but the account wanders further from your plan.\n"
-    "- **Tighter:** stays closer to plan, but you trade (and pay) more often.\n\n"
-    "A fund is traded when it breaks **either** dial."
-)
 with st.sidebar.expander("How it works"):
     st.markdown(
-        "1. **Measure drift.** Compare each fund's share of the account with its target.\n"
-        "2. **Flag what's broken.** A fund is off target when it breaks *either* dial. "
-        "Whichever dial is stricter for that fund sets its allowed range.\n"
-        "3. **Trade only what's broken.** Those funds go back to target. The cash left over goes "
-        "to funds that are under target but still in range.\n"
-        "4. **Check risk.** Volatility is estimated from a year of daily prices, "
-        "before and after the trades."
+        "1. **Choose a mix.** Start from a model and edit any target.\n"
+        "2. **Measure drift.** Each fund's share of the account vs. its target.\n"
+        "3. **Flag breaches.** A fund breaches if it breaks *either* band.\n"
+        "4. **Trade only breaches.** They go back to target; leftover cash goes to in-range "
+        "funds on the right side of target.\n"
+        "5. **Check risk.** Volatility from a year of daily prices, before and after.\n\n"
+        "**Wider bands:** fewer trades, more drift. **Tighter:** closer to plan, more trading."
     )
 
-sample = load_sample_account()
-sample = pd.DataFrame({
-    "ticker": sample["ticker"],
-    "fund": sample["ticker"].map(FUND_NAMES),
-    "value": sample["value"],
-    "target": sample["target"] * 100,
-})
-# The editor sits below this text, so replay its edits now to keep the text current.
-live = apply_edits(sample, st.session_state.get("account_editor", {}))
-live = live.dropna(subset=["ticker"])
-live_value = pd.to_numeric(live["value"], errors="coerce").fillna(0).sum()
+# --- Page frame: filled in once the inputs below are read ------------------------
+st.html('<div class="brand"><b>Rebalance Planner</b>'
+        "<span>The fewest trades that put a portfolio back on its target mix, with the risk impact.</span></div>")
+summary = st.container()
+tab_mix, tab_rebal = st.tabs(["Target mix", "Rebalance"])
 
-# --- The goal ------------------------------------------------------------------
-def in_sentence(ticker: str) -> str:
-    """'International stocks' -> 'international stocks'; leaves 'US bonds' and raw tickers alone."""
-    t = str(ticker).strip().upper()
-    name = fund(t) or t
-    return name if name[:2].isupper() else name[0].lower() + name[1:]
+with tab_mix:
+    mix_left, mix_right = st.columns([5, 6], gap="large")
+    with mix_left:
+        st.subheader("Choose your mix")
+        choice = st.selectbox("Model", list(model_mixes), key="model",
+                              help="A starting point. Edit any target below and everything updates.")
+        st.caption(model_mixes[choice][1])
+        targets_in = st.data_editor(
+            model_frame(choice),
+            key=f"targets_{choice}",
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            disabled=["fund"],
+            column_config={
+                "ticker": st.column_config.TextColumn("Ticker", required=True),
+                "fund": st.column_config.TextColumn("Fund"),
+                "target": st.column_config.NumberColumn("Target", format="%.1f%%", min_value=0, max_value=100,
+                                                        help="Share of the account you want in this fund."),
+            },
+        )
+        target_note = st.empty()
+
+with tab_rebal:
+    with st.expander(f"Holdings · {money(live_total)} · {len(live.dropna(subset=['ticker']))} funds"):
+        st.caption("What each fund is worth today. Edit a value and the account size follows.")
+        holdings_in = st.data_editor(
+            ss.holdings_base,
+            key=f"holdings_{ss.holdings_ver}",
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            disabled=["fund"],
+            column_config={
+                "ticker": st.column_config.TextColumn("Ticker", required=True),
+                "fund": st.column_config.TextColumn("Fund"),
+                "value": st.column_config.NumberColumn("Market value", format="dollar", min_value=0),
+            },
+        )
+
+account = clean(holdings_in, "value")
+target_rows = clean(targets_in, "target")
 
 
-top = live.assign(target=pd.to_numeric(live["target"], errors="coerce")).nlargest(2, "target")
-mix = " and ".join(f"{t:g}% in {escape(in_sentence(tk))}" for tk, t in zip(top["ticker"], top["target"]))
-st.html(
-    '<div class="goal"><b>The goal:</b> keep your account close to the mix you chose, using as few '
-    f"trades as possible. Your targets{f' ({mix})' if mix else ''} set how much risk "
-    "you're taking. As prices move the mix drifts, and your risk drifts with it. This tool finds "
-    "the smallest set of trades that puts it back."
-    '<span class="hint">Adjust the dials in the sidebar (tap » on a phone) and watch every '
-    "section update.</span></div>"
-)
+def stop(message: str) -> None:
+    summary.error(message)
+    st.stop()
 
-# --- Account (editable) ----------------------------------------------------
-with st.expander(f"✏️ Your account · {money(live_value)} across {len(live)} funds (tap to edit)"):
-    st.markdown(
-        "**Market value** is what each fund is worth today. **Target** is the share of the account "
-        "you *want* in it: 40% means 40 cents of every dollar. Targets must add up to 100%."
-    )
-    account = st.data_editor(
-        sample,
-        key="account_editor",
-        num_rows="dynamic",
-        hide_index=True,
-        width="stretch",
-        disabled=["fund"],
-        column_config={
-            "ticker": st.column_config.TextColumn("Ticker", required=True),
-            "fund": st.column_config.TextColumn("What it is"),
-            "value": st.column_config.NumberColumn("Market value", format="dollar", min_value=0),
-            "target": st.column_config.NumberColumn("Target", format="%.1f%%", min_value=0, max_value=100),
-        },
-    )
-
-account = account.dropna(subset=["ticker"]).fillna({"value": 0, "target": 0})
-account["ticker"] = account["ticker"].str.strip().str.upper()
-account = account[account["ticker"] != ""]
-account["target"] = account["target"] / 100
 
 if account["ticker"].duplicated().any():
-    st.error("Each ticker can appear only once.")
-    st.stop()
+    stop("Each ticker can appear only once in your holdings.")
+if target_rows["ticker"].duplicated().any():
+    stop("Each ticker can appear only once in your targets.")
 if account["value"].sum() <= 0:
-    st.error("Enter at least one holding with a market value.")
-    st.stop()
-target_sum = account["target"].sum()
+    stop("Enter at least one holding with a market value.")
+target_sum = target_rows["target"].sum() / 100
 if abs(target_sum - 1) > 1e-6:
-    st.error(f"Your targets add up to {target_sum:.1%}. They must add up to 100%.")
-    st.stop()
+    gap = (1 - target_sum) * 100
+    msg = f"Targets add up to {target_sum:.1%}. {'Add' if gap > 0 else 'Remove'} {abs(gap):.1f} pts."
+    target_note.warning(msg)
+    stop(msg)
+target_note.caption("✓ Adds up to 100%")
 
 # --- The math (all in pure modules) ----------------------------------------
 holdings = account.set_index("ticker")["value"]
-targets = account.set_index("ticker")["target"]
+targets = target_rows.set_index("ticker")["target"] / 100
 total = holdings.sum()
 
 drift = compute_drift(holdings, targets, abs_band, rel_band)
@@ -223,16 +306,10 @@ n_breach = len(breached)
 big = targets.idxmax()
 small = targets[targets > 0].idxmin()
 tb, ts = targets[big], targets[small]
-abs_example.caption(
-    f"Example: **{big}** targets {tb:.0%}, so this dial lets it sit anywhere from "
-    f"{max(tb - abs_band, 0):.1%} to {tb + abs_band:.1%}."
-)
-rel_example.caption(
-    f"Example: **{small}** targets {ts:.0%}. The first dial alone would let it run from "
-    f"{max(ts - abs_band, 0):.1%} to {ts + abs_band:.1%}. This one holds it to "
-    f"{ts * (1 - rel_band):.2%} to {ts * (1 + rel_band):.2%}."
-)
+abs_example.caption(f"{big} at {tb:.0%} may sit {max(tb - abs_band, 0):.1%}–{tb + abs_band:.1%}")
+rel_example.caption(f"{small} at {ts:.0%} may sit {ts * (1 - rel_band):.2%}–{ts * (1 + rel_band):.2%}")
 
+prices = load_price_history()
 cov = load_cov()
 w_before = drift["current_weight"]
 w_after = (drift["value"] + corridor) / total
@@ -243,283 +320,384 @@ try:
     vol_full = portfolio_vol(w_full, cov)
     rc_before = risk_contributions(w_before, cov) / vol_before
     rc_after = risk_contributions(w_after, cov) / vol_after
+    rc_target = risk_contributions(targets, cov) / vol_full
+    te_before = tracking_error(w_before, targets, cov)
+    te_after = tracking_error(w_after, targets, cov)
+    history = past_year(targets, prices)
+    model_stats = {
+        name: (portfolio_vol(pd.Series(mix) / 100, cov), past_year(pd.Series(mix) / 100, prices))
+        for name, (mix, _) in MODELS.items()
+    }
     risk_error = None
 except ValueError as e:
     risk_error = str(e)
 
-# --- Verdict -----------------------------------------------------------------
+# --- Summary: verdict + KPIs ----------------------------------------------------
 if n_breach == 0:
-    headline = f"All {len(drift)} holdings are inside their ranges. No trades needed."
-    sub = "The account is close enough to its target model. Trading now would cost more than it fixes."
+    headline = "Every fund is in range. No trades needed."
+    sub = f"Volatility {vol_before:.2%} · target mix {vol_full:.2%}" if risk_error is None else ""
 else:
-    bought = corridor[corridor > 0].sum()
-    noun = "holding has" if n_breach == 1 else "holdings have"
-    headline = (f"{n_breach} {noun} drifted off target. "
-                f"{t_corr['n_trades']} trade{'s' if t_corr['n_trades'] != 1 else ''} fix it.")
-    sub = f"Sell {money(bought)} and buy {money(bought)} to bring the account back in line"
+    n = t_corr["n_trades"]
+    headline = f"{n} trade{'s' if n != 1 else ''} bring{'' if n != 1 else 's'} the account back in line."
+    parts = [f"{money(corridor[corridor > 0].sum())} each way"]
     if risk_error is None:
-        sub += (f", moving yearly volatility from {vol_before:.2%} to {vol_after:.2%} "
-                f"(your target mix is built for {vol_full:.2%})")
+        parts.append(f"volatility {vol_before:.2%} → {vol_after:.2%} (target {vol_full:.2%})")
     saved = t_full["dollars"] - t_corr["dollars"]
     if saved > 0.5:
-        sub += f". That's {money(saved)} less trading than a full rebalance"
-    sub += "."
+        parts.append(f"{money(saved)} less than a full rebalance")
+    sub = " · ".join(parts)
 
-st.html(
-    f'<div class="hero"><p class="eyebrow">Rebalance planner · {money(total)} account</p>'
-    f"<h1>{escape(headline)}</h1><p>{escape(sub)}</p></div>"
-)
-
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Off target", f"{n_breach} of {len(drift)}", border=True,
-          help="Holdings outside their allowed range.")
-k2.metric("Trades", t_corr["n_trades"], border=True,
-          help="Buys and sells in the proposed plan.")
-k3.metric("Money moved", money(t_corr["dollars"]), border=True,
-          help="Total of all buys plus all sells.")
-if risk_error is None:
-    k4.metric("Volatility", f"{vol_after:.1%}", delta=f"{(vol_after - vol_before) * 100:+.2f} pts",
-              delta_color="inverse", border=True,
-              help="How much the account's value typically swings in a year, after the trades. "
-                   f"Your target mix is built for {vol_full:.1%}.")
-else:
-    k4.metric("Volatility", "n/a", border=True)
-
-# --- Step 1: Where you stand -------------------------------------------------
-step(1, "Where you stand")
-st.subheader("How far each fund has drifted")
-st.markdown(
-    "Every fund is lined up on its own target (the **black line**). The **gray bar** is how far "
-    "it may drift either way, and the **dot** is where it sits today. "
-    "A **red dot** has left its range."
-)
-
-order = list(drift.index)
-labels = [f"<b>{t}</b><br><span style='font-size:11px;color:{MUTED}'>{escape(fund(t))}</span>" for t in order]
-y = list(range(len(order)))
-inside = ~drift["breach"]
-lo_pts = (drift["band_lo"] - drift["target_weight"]) * 100
-hi_pts = (drift["band_hi"] - drift["target_weight"]) * 100
-drift_pts = drift["drift_pts"] * 100
-reach = max(drift_pts.abs().max(), hi_pts.max(), 1.0) * 1.2
-
-fig = go.Figure()
-fig.add_bar(
-    name="Allowed range", y=y, base=lo_pts, x=hi_pts - lo_pts, orientation="h",
-    marker=dict(color=RANGE_FILL, cornerradius=4), width=0.5,
-    customdata=list(zip(drift["band_lo"] * 100, drift["band_hi"] * 100)),
-    hovertemplate="Allowed %{customdata[0]:.2f}% to %{customdata[1]:.2f}%<extra></extra>",
-)
-fig.add_scatter(
-    name="Target", x=[0, 0], y=[-0.5, len(order) - 0.5], mode="lines",
-    line=dict(color=INK, width=2), hoverinfo="skip",
-)
-for mask, name, color in [(inside, "Inside range", INK), (~inside, "Outside range", BREACH_COLOR)]:
-    pts = drift_pts[mask]
-    fig.add_scatter(
-        name=name, y=[i for i, m in zip(y, mask) if m], x=pts,
-        mode="markers+text", text=[f"{v:+.1f} pts" for v in pts],
-        textposition="top center",
-        textfont=dict(size=11, color=INK),
-        marker=dict(size=14, color=color, line=dict(width=2, color="#ffffff")),
-        customdata=list(zip(drift.loc[mask, "current_weight"] * 100, drift.loc[mask, "target_weight"] * 100,
-                            drift.loc[mask, "breach_reason"].replace("", "inside both bands"))),
-        hovertemplate="Now %{customdata[0]:.1f}% vs. target %{customdata[1]:.1f}%<br>%{customdata[2]}"
-                      "<extra>" + name + "</extra>",
+with summary:
+    st.html(
+        f'<div class="hero"><p class="eyebrow">{money(total)} account · {n_breach} of {len(drift)} '
+        f"funds off target</p><h1>{escape(headline)}</h1><p>{escape(sub)}</p></div>"
     )
-fig.update_layout(
-    height=110 + 62 * len(order), margin=dict(l=0, r=10, t=10, b=0),
-    plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", font=dict(family="Inter, sans-serif", color=INK),
-    legend=dict(orientation="h", y=-0.18, x=0, font=dict(size=12)),
-    xaxis=dict(title="Distance from target (percentage points)", range=[-reach, reach],
-               tickformat="+.0f", gridcolor="#eeeeea", zeroline=False),
-    yaxis=dict(tickvals=y, ticktext=labels, range=[len(order) - 0.5, -0.5], showgrid=False),
-    hoverlabel=dict(bgcolor="#ffffff", font=dict(color=INK)),
-)
-st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Account", money(total), border=True, height="stretch", help="Total market value of every holding.")
+    k2.metric("Off target", f"{n_breach} of {len(drift)}", border=True, height="stretch",
+              help="Funds outside their allowed range.")
+    k3.metric("Trades", t_corr["n_trades"], border=True, height="stretch", help="Buys and sells in the plan.")
+    k4.metric("Traded", money(t_corr["dollars"]), delta=f"{t_corr['dollars'] / total:.1%} of account",
+              delta_color="off", delta_arrow="off", border=True, height="stretch",
+              help="All buys plus all sells. As a share of the account it's the same at any account size.")
+    if risk_error is None:
+        k5.metric("Volatility", f"{vol_after:.1%}", delta=f"{(vol_after - vol_before) * 100:+.2f} pts",
+                  delta_color="inverse", border=True, height="stretch",
+                  help="How much the account typically swings in a year, after the trades. "
+                       f"The target mix is built for {vol_full:.1%}.")
+    else:
+        k5.metric("Volatility", "n/a", border=True, height="stretch")
 
-with st.expander("See the numbers"):
-    st.dataframe(
-        pd.DataFrame({
-            "Fund": [fund(t) for t in order],
-            "Now": drift["current_weight"] * 100,
-            "Target": drift["target_weight"] * 100,
-            "Allowed from": drift["band_lo"] * 100,
-            "Allowed to": drift["band_hi"] * 100,
-            "Drift (pts)": drift["drift_pts"] * 100,
-            "Drift (% of target)": drift["drift_rel"] * 100,
-            "Breach": drift["breach_reason"].replace("", "—"),
-        }),
-        width="stretch",
-        column_config={
-            c: st.column_config.NumberColumn(format="%.2f%%")
-            for c in ["Now", "Target", "Allowed from", "Allowed to"]
-        } | {
-            "Drift (pts)": st.column_config.NumberColumn(format="%+.2f"),
-            "Drift (% of target)": st.column_config.NumberColumn(format="%+.0f%%"),
-        },
+# --- Tab 1: the target mix, in dollars and in risk ------------------------------
+with mix_right:
+    st.subheader(f"{money(total)} by target")
+    alloc = targets[targets > 0].sort_values()
+    afig = go.Figure(go.Bar(
+        x=alloc * total, y=list(alloc.index), orientation="h",
+        marker=dict(color=INK, cornerradius=4),
+        text=[f"{money(v * total)} · {v * 100:.1f}%" for v in alloc], textposition="auto",
+        insidetextanchor="end", insidetextfont=dict(color="#ffffff", size=12),
+        outsidetextfont=dict(color=INK, size=12), cliponaxis=False,
+        customdata=[fund(t) for t in alloc.index],
+        hovertemplate="%{y} · %{customdata}<br>%{x:$,.0f}<extra></extra>",
+    ))
+    chart_layout(
+        afig, 80 + 44 * len(alloc),
+        xaxis=dict(visible=False, range=[0, alloc.max() * total * 1.45]),
+        yaxis=dict(tickvals=list(alloc.index),
+                   ticktext=[f"<b>{t}</b> <span style='color:{MUTED}'>{escape(fund(t))}</span>"
+                             for t in alloc.index]),
     )
+    st.plotly_chart(afig, width="stretch", config={"displayModeBar": False})
+
+with tab_mix:
+    st.subheader("Risk profile")
+    if risk_error is not None:
+        st.warning(f"{risk_error}. Prices cover: {', '.join(cov.index)}.")
+    else:
+        window = f"{prices.index[0]:%b %Y}–{prices.index[-1]:%b %Y}"
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Yearly swing", f"±{vol_full:.1%}", border=True, height="stretch",
+                  help="Volatility of the target mix. In about two years out of three, the account ends "
+                       "within this much of where it started.")
+        m2.metric("In dollars", f"±{money(vol_full * total)}", border=True, height="stretch",
+                  help="The same swing at your account size.")
+        m3.metric("Last 12 months", f"{history['total_return']:+.1%}", border=True, height="stretch",
+                  help=f"What this mix returned {window}, held steady. Not a forecast.")
+        m4.metric("Worst drop", f"{history['max_drawdown']:.1%}",
+                  delta=money(history["max_drawdown"] * total), delta_color="off", delta_arrow="off",
+                  border=True, height="stretch", help=f"Biggest fall from a high to a later low, {window}.")
+
+        ladder_col, notes_col = st.columns([6, 5], gap="large")
+        with ladder_col:
+            st.markdown("**Versus our models**")
+            rows = [(name, v, h["total_return"], h["max_drawdown"]) for name, (v, h) in model_stats.items()]
+            rows.append(("Your mix", vol_full, history["total_return"], history["max_drawdown"]))
+            rows.sort(key=lambda r: r[1])
+            names = [r[0] for r in rows]
+            lfig = go.Figure()
+            for mine, color, size in [(False, BEFORE_COLOR, 13), (True, INK, 17)]:
+                pick = [r for r in rows if (r[0] == "Your mix") == mine]
+                lfig.add_scatter(
+                    x=[r[1] * 100 for r in pick], y=[r[0] for r in pick],
+                    mode="markers+text", text=[f"{r[1]:.1%}" for r in pick], textposition="middle right",
+                    textfont=dict(size=12, color=INK),
+                    marker=dict(size=size, color=color, symbol="diamond" if mine else "circle",
+                                line=dict(width=2, color="#ffffff")),
+                    customdata=[(r[2] * 100, r[3] * 100) for r in pick],
+                    hovertemplate="<b>%{y}</b><br>Swing ±%{x:.1f}% a year<br>Last 12 months %{customdata[0]:+.1f}%"
+                                  "<br>Worst drop %{customdata[1]:.1f}%<extra></extra>",
+                )
+            lo, hi = min(r[1] for r in rows) * 100, max(r[1] for r in rows) * 100
+            chart_layout(
+                lfig, 70 + 46 * len(rows), showlegend=False,
+                xaxis=dict(title="Yearly swing (volatility)", ticksuffix="%", gridcolor="#eeeeea",
+                           zeroline=False, range=[max(lo - 1.5, 0), hi + 2]),
+                yaxis=dict(categoryorder="array", categoryarray=names[::-1], tickvals=names[::-1],
+                           ticktext=[f"<b>{n}</b>" if n == "Your mix" else n for n in names[::-1]]),
+            )
+            st.plotly_chart(lfig, width="stretch", config={"displayModeBar": False})
+
+        with notes_col:
+            st.markdown("**Insights**")
+            notes = []
+            ladder = sorted((v, n) for n, (v, _) in model_stats.items() if n != "Equal weight")
+            near = [n for v, n in ladder if abs(v - vol_full) < 0.0015]
+            below = [(v, n) for v, n in ladder if v < vol_full]
+            above = [(v, n) for v, n in ladder if v > vol_full]
+            if near:
+                notes.append(f"Risk in line with **{near[0]}**.")
+            elif below and above:
+                notes.append(f"Risk between **{below[-1][1]}** ({below[-1][0]:.1%}) "
+                             f"and **{above[0][1]}** ({above[0][0]:.1%}).")
+            elif above:
+                notes.append(f"Less risk than **{above[0][1]}** ({above[0][0]:.1%}), our lowest.")
+            else:
+                notes.append(f"More risk than **{below[-1][1]}** ({below[-1][0]:.1%}), our highest.")
+
+            # Risk share / money share = each fund's marginal risk per dollar
+            money_share = targets.reindex(rc_target.index, fill_value=0)
+            per_dollar = (rc_target / money_share.where(money_share >= 0.03)).dropna().sort_values(ascending=False)
+            for i, t in enumerate(per_dollar.index[:2]):
+                if per_dollar[t] >= 1.3:
+                    notes.append(f"**{t}**: {pct(money_share[t])} of money, **{pct(rc_target[t])} of risk**"
+                                 + (". Most risk per dollar." if i == 0 else "."))
+            calm = [t for t in rc_target.index if targets.get(t, 0) >= 0.03 and rc_target[t] < 0.5 * targets[t]]
+            if calm:
+                notes.append(f"**{', '.join(calm)}** steady the account: real money, little risk.")
+            if targets.max() >= 0.5:
+                notes.append(f"Over half in **{targets.idxmax()}**: its bad year is your bad year.")
+            new = [t for t in targets.index if targets[t] > 0 and t not in holdings.index]
+            if new:
+                notes.append(f"Not held yet: **{', '.join(new)}**. The plan buys {'it' if len(new) == 1 else 'them'}.")
+            gone = [t for t in holdings.index if (t not in targets.index or targets[t] == 0) and holdings[t] > 0]
+            if gone:
+                notes.append(f"No target for **{', '.join(gone)}**. The plan sells {'it' if len(gone) == 1 else 'them'}.")
+            st.markdown("\n".join(f"- {n}" for n in notes))
+            st.caption(f"Daily prices, {window}. Not a forecast.")
 
 
-# --- Step 2: What to trade ----------------------------------------------------
+# --- Tab 2: rebalance -----------------------------------------------------------
 def why(t: str) -> str:
     r = drift.loc[t]
-    now, tgt = pct(r["current_weight"]), pct(r["target_weight"])
+    vs = f"{pct(r['current_weight'])} vs. {pct(r['target_weight'])} target"
     pts = abs(r["drift_pts"]) * 100
     side = "over" if r["drift_pts"] > 0 else "under"
     if r["breach"]:
         if r["target_weight"] == 0:
-            return f"Not in the target model at all, so it's sold in full."
+            return "Not in the target mix · sold in full"
         if r["breach_reason"] == "absolute":
-            return (f"It's {now} of the account against a {tgt} target: {pts:.1f} pts {side}, "
-                    f"past the ±{abs_band * 100:g} pt limit. Trading back to target.")
+            return f"{vs} · {pts:.1f} pts {side}, past ±{abs_band * 100:g} pt band"
         if r["breach_reason"] == "relative":
-            return (f"It's {now} against a {tgt} target. Only {pts:.1f} pts, but that's "
-                    f"{abs(r['drift_rel']) * 100:.0f}% {side} its own target, past the ±{rel_band * 100:g}% "
-                    f"limit. Small holdings need this second check. Trading back to target.")
-        return (f"It's {now} against a {tgt} target: {pts:.1f} pts and "
-                f"{abs(r['drift_rel']) * 100:.0f}% {side}, past both limits. Trading back to target.")
+            return (f"{vs} · {abs(r['drift_rel']) * 100:.0f}% {side} its target, "
+                    f"past ±{rel_band * 100:g}% band")
+        return f"{vs} · past both bands"
     if corridor[t] > 0:
-        return (f"Takes a share of the leftover cash. It's {pts:.1f} pts under target but still inside "
-                f"its range, so it's topped up rather than forced.")
-    return (f"Trimmed to pay for the buys. It's {pts:.1f} pts over target but still inside its range.")
+        return f"{vs} · in range, gets leftover cash"
+    return f"{vs} · in range, trimmed to fund buys"
 
 
-step(2, "What to trade")
-if n_breach == 0:
-    st.subheader("Nothing to trade")
-    st.markdown("Every fund is inside its range. Tighten the bands in the sidebar to see what would trade.")
-else:
-    st.subheader(f"{t_corr['n_trades']} trades, netting to $0")
-    st.markdown(
-        "Funds that broke their range go back to target first. Those trades leave cash over "
-        "(or short), which is spread across in-range funds that are on the right side of their "
-        "target, so nothing is pushed further from where it should be."
+order = list(drift.index)
+with tab_rebal:
+    row1_left, row1_right = st.columns(2, gap="large")
+    row2_left, row2_right = st.columns(2, gap="large")
+
+# Step 1: drift
+with row1_left:
+    step(1, "Drift")
+    st.subheader(f"{n_breach} of {len(drift)} funds out of range" if n_breach else "All funds in range")
+
+    labels = [f"<b>{t}</b><br><span style='font-size:11px;color:{MUTED}'>{escape(fund(t))}</span>" for t in order]
+    y = list(range(len(order)))
+    inside = ~drift["breach"]
+    lo_pts = (drift["band_lo"] - drift["target_weight"]) * 100
+    hi_pts = (drift["band_hi"] - drift["target_weight"]) * 100
+    drift_pts = drift["drift_pts"] * 100
+    reach = max(drift_pts.abs().max(), hi_pts.max(), 1.0) * 1.2
+
+    fig = go.Figure()
+    fig.add_bar(
+        name="Allowed range", y=y, base=lo_pts, x=hi_pts - lo_pts, orientation="h",
+        marker=dict(color=RANGE_FILL, cornerradius=4), width=0.5,
+        customdata=list(zip(drift["band_lo"] * 100, drift["band_hi"] * 100)),
+        hovertemplate="Allowed %{customdata[0]:.2f}% to %{customdata[1]:.2f}%<extra></extra>",
     )
-    tickets = []
-    for t in sorted(order, key=lambda t: -abs(corridor[t])):
-        amt = corridor[t]
-        if abs(amt) < MIN_TRADE:
-            continue
-        side = "buy" if amt > 0 else "sell"
-        tickets.append(
-            f'<div class="ticket"><span class="side {side}">{side.upper()}</span>'
-            f'<span class="amt">{money(abs(amt), cents=True)}</span>'
-            f'<span class="fund">{escape(t)} <span>{escape(fund(t))}</span></span>'
-            f'<span class="why">{escape(why(t))}</span></div>'
+    fig.add_scatter(
+        name="Target", x=[0, 0], y=[-0.5, len(order) - 0.5], mode="lines",
+        line=dict(color=INK, width=2), hoverinfo="skip",
+    )
+    for mask, name, color in [(inside, "In range", INK), (~inside, "Out of range", BREACH_COLOR)]:
+        pts = drift_pts[mask]
+        fig.add_scatter(
+            name=name, y=[i for i, m in zip(y, mask) if m], x=pts,
+            mode="markers+text", text=[f"{v:+.1f}" for v in pts],
+            textposition="top center",
+            textfont=dict(size=11, color=INK),
+            marker=dict(size=14, color=color, line=dict(width=2, color="#ffffff")),
+            customdata=list(zip(drift.loc[mask, "current_weight"] * 100, drift.loc[mask, "target_weight"] * 100,
+                                drift.loc[mask, "breach_reason"].replace("", "inside both bands"))),
+            hovertemplate="Now %{customdata[0]:.1f}% vs. target %{customdata[1]:.1f}%<br>%{customdata[2]}"
+                          "<extra>" + name + "</extra>",
         )
-    held = [t for t in order if abs(corridor[t]) < MIN_TRADE]
-    if held:
-        names = ", ".join(escape(t) for t in held)
-        them = "them" if len(held) > 1 else "it"
-        tickets.append(f'<div class="hold">Left alone: {names}. Still inside '
-                       f"{'their ranges' if len(held) > 1 else 'its range'}, so moving {them} "
-                       f"wouldn't fix anything that's broken.</div>")
-    st.html("".join(tickets))
-
-# --- Step 3: What happens to risk ---------------------------------------------
-step(3, "What happens to risk")
-if risk_error is not None:
-    st.subheader("Risk check unavailable")
-    st.warning(f"{risk_error}. The price file covers: {', '.join(cov.index)}.")
-else:
-    swing_before, swing_after = vol_before * total, vol_after * total
-    top = rc_before.idxmax()
-    explainer = ("**Volatility** is how much the account's value typically moves in a year. "
-                 "In dollars: roughly two years in three, this account should end within "
-                 f"**±\u2060{money(swing_before)}** of where it started")
-    if t_corr["n_trades"]:
-        st.subheader(f"Volatility {vol_before:.1%} → {vol_after:.1%}")
-        say(explainer + f" today, and **±\u2060{money(swing_after)}** after the trades.")
-    else:
-        st.subheader(f"Volatility {vol_before:.1%}, unchanged")
-        say(explainer + ". No trades, so no change.")
-
-    direction = "up" if vol_before > vol_full else "down"
-    goal = ("The aim isn't the lowest possible risk. It's the risk **your target mix is built for: "
-            f"{vol_full:.2%}**. ")
-    if t_corr["n_trades"]:
-        gap_pts = abs(vol_after - vol_full) * 100
-        landing = "right on target" if gap_pts < 0.005 else f"within {gap_pts:.2f} pts of target"
-        goal += (f"Drift has pushed the account {direction} to {vol_before:.2%}, and these trades bring it "
-                 f"back to {vol_after:.2%}, {landing}.")
-    else:
-        goal += (f"The account is at {vol_before:.2%} today. Every fund is inside its range, "
-                 "so that gap isn't worth paying to close.")
-    st.markdown(goal)
-
-    st.markdown(
-        f"Risk isn't spread the way money is. **{top}** is {pct(w_before[top])} of the money but "
-        f"**{pct(rc_before[top])} of the risk** today"
-        + (f", and {pct(rc_after[top])} after the trades." if abs(rc_after[top] - rc_before[top]) > 0.0005 else ".")
+    chart_layout(
+        fig, 110 + 58 * len(order),
+        legend=dict(orientation="h", y=-0.18, x=0, font=dict(size=12)),
+        xaxis=dict(title="Points from target", range=[-reach, reach],
+                   tickformat="+.0f", gridcolor="#eeeeea", zeroline=False),
+        yaxis=dict(tickvals=y, ticktext=labels, range=[len(order) - 0.5, -0.5], showgrid=False),
     )
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
-    risk_tickers = [t for t in order if t in cov.index]
-    rfig = go.Figure()
-    for name, rc, color in [("Before", rc_before, BEFORE_COLOR), ("After trades", rc_after, AFTER_COLOR)]:
-        rfig.add_bar(
-            name=name, y=risk_tickers, x=rc[risk_tickers] * 100, orientation="h",
-            marker=dict(color=color, cornerradius=4),
-            hovertemplate="%{y}: %{x:.1f}% of risk<extra>" + name + "</extra>",
-        )
-    rfig.update_layout(
-        barmode="group", bargap=0.35, bargroupgap=0.1,
-        height=80 + 56 * len(risk_tickers), margin=dict(l=0, r=10, t=30, b=0),
-        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", font=dict(family="Inter, sans-serif", color=INK),
-        legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0),
-        xaxis=dict(title="Share of portfolio risk", ticksuffix="%", gridcolor="#eeeeea", zeroline=False),
-        yaxis=dict(autorange="reversed"),
-        hoverlabel=dict(bgcolor="#ffffff", font=dict(color=INK)),
-    )
-    st.plotly_chart(rfig, width="stretch", config={"displayModeBar": False})
-
-    with st.expander("See the numbers"):
+    with st.expander("Numbers"):
         st.dataframe(
             pd.DataFrame({
-                "Fund": [fund(t) for t in risk_tickers],
-                "Share of money (before)": w_before[risk_tickers] * 100,
-                "Share of risk (before)": rc_before[risk_tickers] * 100,
-                "Share of money (after)": w_after[risk_tickers] * 100,
-                "Share of risk (after)": rc_after[risk_tickers] * 100,
-            }, index=pd.Index(risk_tickers, name="ticker")),
+                "Fund": [fund(t) for t in order],
+                "Now": drift["current_weight"] * 100,
+                "Target": drift["target_weight"] * 100,
+                "Allowed from": drift["band_lo"] * 100,
+                "Allowed to": drift["band_hi"] * 100,
+                "Drift (pts)": drift["drift_pts"] * 100,
+                "Drift (% of target)": drift["drift_rel"] * 100,
+                "Breach": drift["breach_reason"].replace("", "—"),
+            }),
             width="stretch",
-            column_config={c: st.column_config.NumberColumn(format="%.1f%%") for c in [
-                "Share of money (before)", "Share of risk (before)",
-                "Share of money (after)", "Share of risk (after)"]},
+            column_config={
+                c: st.column_config.NumberColumn(format="%.2f%%")
+                for c in ["Now", "Target", "Allowed from", "Allowed to"]
+            } | {
+                "Drift (pts)": st.column_config.NumberColumn(format="%+.2f"),
+                "Drift (% of target)": st.column_config.NumberColumn(format="%+.0f%%"),
+            },
         )
-        st.caption("Volatility uses one year of daily adjusted closes (annualized ×252). "
-                   "Each fund's share of risk is wᵢ(Σw)ᵢ / σ, and the shares add up to 100%.")
 
-# --- Step 4: Why not rebalance everything? -------------------------------------
-step(4, "Why not rebalance everything?")
-st.subheader("Corridor vs. full rebalance")
-st.markdown(
-    "A full rebalance pushes *every* fund back to target, including ones that are only slightly off. "
-    "The corridor approach leaves small drifts alone. Each trade has a cost (spreads, commissions, "
-    "taxable gains in a taxable account), so skipping trades that barely change anything is worth it."
-)
-c1, c2 = st.columns(2)
-with c1.container(border=True):
-    st.markdown("**Corridor** (this plan)")
-    st.metric("Money moved", money(t_corr["dollars"]),
-              delta=f"{money(t_corr['dollars'] - t_full['dollars'])} vs. full", delta_color="inverse")
-    st.caption(f"{t_corr['n_trades']} trades" + (f" · volatility {vol_after:.2%}" if risk_error is None else ""))
-with c2.container(border=True):
-    st.markdown("**Full rebalance**")
-    st.metric("Money moved", money(t_full["dollars"]))
-    st.caption(f"{t_full['n_trades']} trades" + (f" · volatility {vol_full:.2%}" if risk_error is None else ""))
+# Step 2: trades
+with row1_right:
+    step(2, "Trades")
+    if n_breach == 0:
+        st.subheader("Nothing to trade")
+        st.caption("Tighten the bands in the sidebar to see what would trade.")
+    else:
+        st.subheader(f"{t_corr['n_trades']} trades, net $0".replace("$", r"\$"),
+                     help="Out-of-range funds go back to target. The cash that frees up (or uses) is "
+                          "shared among in-range funds on the right side of their target, so nothing "
+                          "moves further from where it should be.")
+        tickets = []
+        for t in sorted(order, key=lambda t: -abs(corridor[t])):
+            amt = corridor[t]
+            if abs(amt) < MIN_TRADE:
+                continue
+            side = "buy" if amt > 0 else "sell"
+            tickets.append(
+                f'<div class="ticket"><span class="side {side}">{side.upper()}</span>'
+                f'<span class="amt">{money(abs(amt))}</span>'
+                f'<span class="fund">{escape(t)} <span>{escape(fund(t))}</span></span>'
+                f'<span class="why">{escape(why(t))}</span></div>'
+            )
+        held = [t for t in order if abs(corridor[t]) < MIN_TRADE]
+        if held:
+            tickets.append(f'<div class="hold">No trade: {", ".join(escape(t) for t in held)} (in range)</div>')
+        st.html("".join(tickets))
 
-fewer_trades = t_full["n_trades"] - t_corr["n_trades"]
-if n_breach == 0:
-    say(f"Nothing is out of range, so this plan trades nothing. A full rebalance would still "
-                f"move **{money(t_full['dollars'])}** across {t_full['n_trades']} trades.")
-elif fewer_trades == 0:
-    st.markdown("With bands this tight every fund breaches, so the corridor plan *is* the full "
-                "rebalance. Widen the bands to see the difference.")
-elif risk_error is None and vol_before - vol_full > 1e-6:
-    captured = (vol_before - vol_after) / (vol_before - vol_full)
-    say(
-        f"The corridor plan gets **{captured:.0%} of the full rebalance's risk reduction** with "
-        f"**{fewer_trades} fewer trade{'s' if fewer_trades != 1 else ''}** and "
-        f"**{money(t_full['dollars'] - t_corr['dollars'])} less** money moved."
-    )
+# Step 3: risk
+with row2_left:
+    step(3, "Risk")
+    if risk_error is not None:
+        st.subheader("Risk check unavailable")
+        st.warning(f"{risk_error}. Prices cover: {', '.join(cov.index)}.")
+    else:
+        if t_corr["n_trades"]:
+            st.subheader(f"Volatility {vol_before:.1%} → {vol_after:.1%}")
+            lede(f"Target mix {vol_full:.2%} <span>·</span> yearly swing "
+                 f"±{money(vol_before * total)} → ±{money(vol_after * total)}")
+        else:
+            st.subheader(f"Volatility {vol_before:.1%}, unchanged")
+            lede(f"Target mix {vol_full:.2%} <span>·</span> yearly swing ±{money(vol_before * total)}")
+
+        top_risk = rc_before.idxmax()
+        moved = abs(rc_after[top_risk] - rc_before[top_risk]) > 0.0005
+        say(f"**{top_risk}**: {pct(w_before[top_risk])} of money, **{pct(rc_before[top_risk])} of risk**"
+            + (f" → {pct(rc_after[top_risk])} after trades." if moved else "."))
+
+        risk_tickers = [t for t in order if t in cov.index]
+        rfig = go.Figure()
+        for name, rc, color in [("Before", rc_before, BEFORE_COLOR), ("After trades", rc_after, AFTER_COLOR)]:
+            rfig.add_bar(
+                name=name, y=risk_tickers, x=rc[risk_tickers] * 100, orientation="h",
+                marker=dict(color=color, cornerradius=4),
+                hovertemplate="%{y}: %{x:.1f}% of risk<extra>" + name + "</extra>",
+            )
+        chart_layout(
+            rfig, 80 + 52 * len(risk_tickers),
+            barmode="group", bargap=0.35, bargroupgap=0.1, margin=dict(l=0, r=10, t=30, b=0),
+            legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0),
+            xaxis=dict(title="Share of portfolio risk", ticksuffix="%", gridcolor="#eeeeea", zeroline=False),
+            yaxis=dict(autorange="reversed"),
+        )
+        st.plotly_chart(rfig, width="stretch", config={"displayModeBar": False})
+
+        with st.expander("Numbers and method"):
+            st.markdown("**Volatility** is how much the account typically moves in a year: about two years in "
+                        "three, it ends within that range. The aim is the risk your target mix is built for, "
+                        "not the lowest risk.")
+            st.dataframe(
+                pd.DataFrame({
+                    "Fund": [fund(t) for t in risk_tickers],
+                    "Money (before)": w_before[risk_tickers] * 100,
+                    "Risk (before)": rc_before[risk_tickers] * 100,
+                    "Money (after)": w_after[risk_tickers] * 100,
+                    "Risk (after)": rc_after[risk_tickers] * 100,
+                }, index=pd.Index(risk_tickers, name="ticker")),
+                width="stretch",
+                column_config={c: st.column_config.NumberColumn(format="%.1f%%") for c in [
+                    "Money (before)", "Risk (before)", "Money (after)", "Risk (after)"]},
+            )
+            st.caption("One year of daily adjusted closes, annualized ×252. "
+                       "Risk share is wᵢ(Σw)ᵢ / σ; shares add up to 100%.")
+
+# Step 4: corridor vs. full
+with row2_right:
+    step(4, "Corridor vs. full rebalance")
+    fewer_trades = t_full["n_trades"] - t_corr["n_trades"]
+    closed = None
+    if risk_error is None and te_before > 1e-9 and n_breach and fewer_trades:
+        # Tracking error is never negative and is 0 after a full rebalance, so this stays within 0-100%.
+        closed = 1 - te_after / te_before
+
+    if n_breach == 0:
+        st.subheader("No trades vs. " + f"{t_full['n_trades']} for a full rebalance")
+    elif n_breach == len(drift):
+        st.subheader("Same plan: every fund breaches")
+    elif fewer_trades == 0:
+        st.subheader("Same trades, either way")
+    elif closed is not None and closed > 0:
+        closed_txt = "Over 99%" if closed > 0.995 and te_after > 1e-9 else f"{closed:.0%}"
+        st.subheader(f"Closes {closed_txt.lower() if closed_txt[0] == 'O' else closed_txt} of the gap",
+                     help="The gap is how far the account is from the target mix, in risk terms. "
+                          "A full rebalance closes 100%.")
+    else:
+        st.subheader(f"{fewer_trades} fewer trade{'s' if fewer_trades != 1 else ''}")
+
+    gap = (lambda te: f" · gap {te:.2%}") if risk_error is None else (lambda te: "")
+    c1, c2 = st.columns(2)
+    with c1.container(border=True, height="stretch"):
+        st.metric("Corridor · this plan", money(t_corr["dollars"]),
+                  delta=f"{money(t_corr['dollars'] - t_full['dollars'])} vs. full", delta_color="inverse")
+        st.caption(f"{t_corr['n_trades']} trades" + gap(te_after))
+    with c2.container(border=True, height="stretch"):
+        st.metric("Full rebalance", money(t_full["dollars"]))
+        st.caption(f"{t_full['n_trades']} trades" + gap(0.0))
+
+    if n_breach == len(drift):
+        st.caption("Widen the bands to see the difference.")
+    elif n_breach and fewer_trades == 0:
+        st.caption(f"Fixing the {n_breach} breaches frees enough cash that every in-range fund gets a share.")
+
+    with st.expander("Why trade less?"):
+        st.markdown(
+            "A full rebalance pushes *every* fund back to target, even ones barely off. The corridor plan "
+            "leaves small drifts alone. Every trade costs something (spreads, commissions, taxes in a "
+            "taxable account), so skipping trades that change little saves money.\n\n"
+            "**The gap** is tracking error: how much the account's yearly return could differ from the "
+            "target mix's. It's 0% after a full rebalance, so the share closed can never pass 100%."
+            + (f" Today {te_before:.2%}; after this plan {te_after:.2%}." if risk_error is None else "")
+        )
